@@ -18,12 +18,15 @@ import (
 // Layout produced:
 //
 //	/EFI/efi.img                    FAT ESP — sd-boot + per-env kernels
-//	    /EFI/BOOT/BOOTX64.EFI       systemd-boot
+//	    /EFI/BOOT/BOOTX64.EFI       systemd-boot, or shim when the image
+//	                                ships a signed shim+GRUB pair
+//	    /EFI/BOOT/grubx64.efi       (signed pair only, with mmx64.efi)
+//	    /EFI/{BOOT,<vendor>}/grub.cfg  (signed pair only)
 //	    /loader/loader.conf
 //	    /loader/entries/<env>.conf
 //	    /images/pxeboot/<env>/{vmlinuz,initrd.img}
-//	/EFI/BOOT/BOOTX64.EFI           fallback at ISO9660 root for
-//	                                firmware that ignores El Torito
+//	/EFI/**                         mirrored at ISO9660 root for firmware
+//	                                that ignores El Torito (loopback boot)
 //	/images/pxeboot/<env>/{vmlinuz,initrd.img}    loopback boot copies
 //	/LiveOS/<env>.rootfs.sfs        per-env rootfs squashfs
 //	/LiveOS/combined.rootfs.sfs     (shared_store.dedup) ONE squashfs,
@@ -41,7 +44,7 @@ import (
 //   - BLS entry into EspMount/loader/entries/<env>.conf
 //
 // Finalize then:
-//   - copies pxeboot/* and BOOTX64.EFI back out of esp-staging into
+//   - copies pxeboot/* and the EFI tree back out of esp-staging into
 //     iso-root for loopback / fallback boot
 //   - sizes + mkfs.fat the ESP image, mcopy's esp-staging into it
 //   - runs xorriso to assemble the final .iso
@@ -157,19 +160,49 @@ func (i *IsoTarget) Finalize(track Track) (string, error) {
 		return "", fmt.Errorf("IsoTarget.Finalize: no EFISource set (orchestrator must pass one of the env images)")
 	}
 
-	// 1. Extract systemd-boot EFI binary from one of the live containers
-	//    into both esp-staging (for the FAT image) and iso-root (for
-	//    firmware that ignores El Torito).
+	// 1. Stage the bootloader into esp-staging, preferring the image's signed
+	//    shim+GRUB pair. Firmware trusts the Microsoft CA that signed shim,
+	//    and shim trusts the distribution CA that signed GRUB, so nothing has
+	//    to be enrolled by hand.
+	//
+	//    Images shipping no pair keep the systemd-boot path, which stages the
+	//    loader as BOOTX64.EFI with nothing ahead of it. That boots only with
+	//    Secure Boot off, and a signed systemd-boot would not change it:
+	//    firmware validates against db, which carries Microsoft's CAs and the
+	//    OEM's, never a distribution's — that key lives inside shim. A shim
+	//    ahead of a distribution-signed systemd-boot chains just as well as
+	//    one ahead of GRUB; this path simply does not build that.
 	efiBaseDir := filepath.Join(i.espStaging, "EFI", "BOOT")
-	efiBin, err := install.ExtractEFIBinary(i.EFISource, efiBaseDir)
+	vendor, signed, err := install.StageSignedChain(i.EFISource, i.espStaging)
 	if err != nil {
 		return "", err
 	}
-	// Mirror to iso-root.
-	if err := runner.Run("sudo", "cp",
-		filepath.Join(efiBaseDir, efiBin),
-		filepath.Join(i.isoRoot, "EFI", "BOOT", efiBin)); err != nil {
-		return "", fmt.Errorf("mirror EFI binary to iso-root: %w", err)
+	if signed {
+		// Every directory the loader may read it from; which one depends on
+		// how that GRUB was built.
+		if err := install.WriteGrubConfig(i.espStaging, install.GrubConfigDirs(vendor)); err != nil {
+			return "", err
+		}
+		// Mirror the whole EFI subtree to iso-root, the same fallback the
+		// systemd-boot path gets: loopback boot (Ventoy) chainloads
+		// EFI/BOOT/BOOTX64.EFI out of the ISO9660 filesystem, which El Torito
+		// and the appended partition are both invisible to.
+		if err := runner.Run("sudo", "cp", "-r",
+			filepath.Join(i.espStaging, "EFI")+"/.",
+			filepath.Join(i.isoRoot, "EFI")+"/"); err != nil {
+			return "", fmt.Errorf("mirror EFI tree to iso-root: %w", err)
+		}
+	} else {
+		efiBin, err := install.ExtractEFIBinary(i.EFISource, efiBaseDir)
+		if err != nil {
+			return "", err
+		}
+		// Mirror to iso-root.
+		if err := runner.Run("sudo", "cp",
+			filepath.Join(efiBaseDir, efiBin),
+			filepath.Join(i.isoRoot, "EFI", "BOOT", efiBin)); err != nil {
+			return "", fmt.Errorf("mirror EFI binary to iso-root: %w", err)
+		}
 	}
 
 	// 2. Mirror per-env kernels from esp-staging out to iso-root for
