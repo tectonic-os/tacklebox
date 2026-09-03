@@ -39,10 +39,11 @@ func GrubConfigDirs(vendor string) []string {
 //
 // The pair is the common shape: bootupd ships it on the Fedora/RHEL-derived
 // images that make up most of the bootc ecosystem (bluefin, aurora, bonito,
-// centos, the Fedora bootc bases). Returns false with no error for the images
-// that ship systemd-boot instead — the TunaOS editions, and Debian-derived
-// images, which have no /usr/lib/efi at all. The caller then falls back to
-// ExtractEFIBinary.
+// centos, the Fedora bootc bases). The deb families keep the same pair under
+// /usr/lib/shim and /usr/lib/grub/x86_64-efi-signed, which is a fourth layout
+// rather than an absence. Returns false with no error for the images that ship
+// systemd-boot instead — the TunaOS editions, and any image carrying neither
+// pair. The caller then falls back to ExtractEFIBinary.
 //
 // purefs.DetectBootChain resolves the same thing from an unpacked OCI tree and
 // is the better home for this once IsoTarget can supply one. Two differences
@@ -78,7 +79,8 @@ func StageSignedChain(image, espStaging string) (string, bool, error) {
 	// versioned payloads. All three are in use across the Fedora/RHEL-derived
 	// images; probing only the last finds no pair on the traditional-ostree
 	// ones (bluefin, aurora, bonito) and falls back to unsigned media without
-	// saying so.
+	// saying so. The deb layout is a fourth arm below, and upstream knows none
+	// of it.
 	//
 	// Hardlinks need no handling here. Fedora ships shimx64.efi, shim.efi and
 	// EFI/BOOT/BOOTX64.EFI as one inode, and cp inside the image follows them;
@@ -110,6 +112,23 @@ if [ -z "$shim" ]; then
         shim=$(ls /usr/lib/efi/shim/*/EFI/"$vendor"/shimx64.efi 2>/dev/null | head -1)
         mok=$(ls /usr/lib/efi/shim/*/EFI/"$vendor"/mmx64.efi 2>/dev/null | head -1)
         if [ -z "$shim" ]; then grub=""; fi
+    fi
+fi
+# The deb families, which none of the layouts above reach: two separate trees,
+# a .signed suffix, and no vendor directory at all. The vendor is the
+# os-release ID, which is what their grubx64 embeds as its prefix. Ubuntu also
+# ships shimx64.efi.signed.latest and .previous; .signed is the one both
+# families have. Its MokManager is unsigned there and is left behind rather
+# than staged, since an unsigned mmx64 cannot load under Secure Boot anyway.
+if [ -z "$shim" ]; then
+    if [ -f /usr/lib/shim/shimx64.efi.signed ] &&
+       [ -f /usr/lib/grub/x86_64-efi-signed/grubx64.efi.signed ]; then
+        shim=/usr/lib/shim/shimx64.efi.signed
+        grub=/usr/lib/grub/x86_64-efi-signed/grubx64.efi.signed
+        vendor=$(. /etc/os-release && echo "$ID")
+        if [ -f /usr/lib/shim/mmx64.efi.signed ]; then
+            mok=/usr/lib/shim/mmx64.efi.signed
+        fi
     fi
 fi
 if [ -z "$shim" ] || [ -z "$grub" ]; then echo "CHAIN=none"; exit 0; fi
