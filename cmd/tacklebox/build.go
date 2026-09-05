@@ -202,9 +202,8 @@ func runBuild(cmd *cobra.Command, args []string) error {
 
 	var tgt target.Target
 	if isIso {
-		// First env's image doubles as the EFI binary source. All ublue
-		// live containers ship systemd-boot under
-		// /usr/lib/systemd/boot/efi/ — see live/Containerfile.generic.
+		// The first env's image is the one the bootloader is
+		// staged from.
 		efiSource := r.BootableEnvironments[0].Image
 		defaultBoot := r.DefaultBoot
 		if defaultBoot != "" && !strings.HasSuffix(defaultBoot, ".conf") {

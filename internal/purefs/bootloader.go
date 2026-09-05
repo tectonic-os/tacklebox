@@ -22,7 +22,8 @@ import (
 //     shim+GRUB pair in its bootupd payload (bluefin, aurora, bonito,
 //     yellowfin — the traditional-ostree/uBlue shape). shim becomes
 //     BOOTX64.EFI, loads grubx64.efi from the same directory, and a
-//     grub.cfg menuentry replaces the BLS entry.
+//     grub.cfg carrying one menuentry per environment replaces the BLS
+//     entries.
 type BootChain struct {
 	Kind string // "sdboot" | "grub2"
 
