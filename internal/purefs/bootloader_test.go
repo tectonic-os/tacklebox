@@ -142,6 +142,42 @@ func TestDetectBootChainNeither(t *testing.T) {
 	}
 }
 
+// Asserts the menu carries one menuentry per environment, in the order
+// given, with the first as default.
+func TestLiveGrubMenu_RendersEveryEntry(t *testing.T) {
+	cfg := LiveGrubMenu([]GrubEntry{
+		{Title: "one", Kernel: "/k1", Initrd: "/i1", Kargs: "a=1"},
+		{Title: "two", Kernel: "/k2", Initrd: "/i2", Kargs: "a=2"},
+		{Title: "three", Kernel: "/k3", Initrd: "/i3", Kargs: "a=3"},
+	})
+	if got := strings.Count(cfg, "menuentry "); got != 3 {
+		t.Fatalf("want 3 menuentry lines, got %d:\n%s", got, cfg)
+	}
+	for _, want := range []string{
+		"menuentry 'one'", "linux /k1 a=1", "initrd /i1",
+		"menuentry 'three'", "linux /k3 a=3", "initrd /i3",
+	} {
+		if !strings.Contains(cfg, want) {
+			t.Errorf("menu missing %q:\n%s", want, cfg)
+		}
+	}
+	// GRUB numbers menu entries from 0 in render order.
+	if !strings.HasPrefix(cfg, "set default=0\n") {
+		t.Errorf("menu does not open with set default=0:\n%s", cfg)
+	}
+	if i, j := strings.Index(cfg, "'one'"), strings.Index(cfg, "'two'"); i > j {
+		t.Errorf("entries rendered out of order:\n%s", cfg)
+	}
+}
+
+// Asserts LiveGrubCfg's output still matches a one-entry LiveGrubMenu.
+func TestLiveGrubCfg_MatchesSingleEntryMenu(t *testing.T) {
+	want := LiveGrubMenu([]GrubEntry{{Title: "t", Kernel: "/k", Initrd: "/i", Kargs: "x=1"}})
+	if got := LiveGrubCfg("t", "/k", "/i", "x=1"); got != want {
+		t.Errorf("LiveGrubCfg diverged from the one-entry menu:\ngot:  %q\nwant: %q", got, want)
+	}
+}
+
 func TestLiveGrubCfg(t *testing.T) {
 	cfg := LiveGrubCfg("TunaOS browser-live (live)",
 		"/images/pxeboot/browser-live/vmlinuz",

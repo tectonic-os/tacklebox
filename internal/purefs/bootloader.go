@@ -114,14 +114,36 @@ func DetectBootChain(root *oci.Node) (*BootChain, error) {
 			"and no bootupd shim+GRUB pair under usr/lib/bootupd/updates/EFI, usr/lib/ostree-boot/efi/EFI or usr/lib/efi/{shim,grub2}")
 }
 
-// LiveGrubCfg renders the grub.cfg for the grub2 chain — the same single
-// live entry the BLS template expresses for systemd-boot. `linux` (not
-// linuxefi) is correct on every bootupd-shipped GRUB: the RH patchset
-// these signed builds carry makes `linux` do the EFI handover.
+// GrubEntry is one environment's entry in the media's GRUB menu.
+type GrubEntry struct {
+	Title  string
+	Kernel string
+	Initrd string
+	Kargs  string
+}
+
+// LiveGrubMenu renders the media's grub.cfg. The ISO shows this menu when
+// it boots through the shim+GRUB chain. It carries what the media's BLS
+// entries carry. Each environment gets one menuentry, in the order given.
+// The first entry is the default.
+//
+// `linux` (not linuxefi) does the EFI handover on bootupd-shipped GRUB.
+// Those builds carry the Red Hat patchset that makes it so.
+func LiveGrubMenu(entries []GrubEntry) string {
+	var b strings.Builder
+	b.WriteString("set default=0\nset timeout=3\n")
+	for _, e := range entries {
+		fmt.Fprintf(&b, "\nmenuentry '%s' {\n    linux %s %s\n    initrd %s\n}\n",
+			e.Title, e.Kernel, e.Kargs, e.Initrd)
+	}
+	return b.String()
+}
+
+// LiveGrubCfg renders the media's grub.cfg for a single environment.
 func LiveGrubCfg(title, kernelPath, initrdPath, kargs string) string {
-	return fmt.Sprintf(
-		"set default=0\nset timeout=3\n\nmenuentry '%s' {\n    linux %s %s\n    initrd %s\n}\n",
-		title, kernelPath, kargs, initrdPath)
+	return LiveGrubMenu([]GrubEntry{{
+		Title: title, Kernel: kernelPath, Initrd: initrdPath, Kargs: kargs,
+	}})
 }
 
 // resolveFile follows hardlinks to the regular file that carries the
