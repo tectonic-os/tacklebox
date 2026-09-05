@@ -7,6 +7,7 @@ import (
 	"sort"
 	"strings"
 
+	"github.com/tuna-os/tacklebox/internal/purefs"
 	"github.com/tuna-os/tacklebox/internal/runner"
 )
 
@@ -52,7 +53,7 @@ func copyCandidatesScript() string {
 
 // bootChain is the bootloader an image ships.
 type bootChain struct {
-	// Kind is "grub2" for a signed shim+GRUB pair, or "sdboot".
+	// Kind is "grub2" for a shim+GRUB pair, or "sdboot".
 	Kind string
 	// Vendor is the EFI directory a grub2 pair came from, or empty.
 	Vendor string
@@ -81,7 +82,7 @@ func resolveBootloader(root string) *bootChain {
 	return nil
 }
 
-// resolveGrubPair looks for a signed shim+GRUB pair in the four layouts.
+// resolveGrubPair looks for a shim+GRUB pair in the four layouts.
 func resolveGrubPair(root, a, bootName string) *bootChain {
 	pair := func(shim, grub, mok, vendor string) *bootChain {
 		files := []espFile{{bootName, shim}, {"grub" + a + ".efi", grub}}
@@ -157,8 +158,8 @@ func globFiles(pattern string) []string {
 }
 
 // StageBootloader copies image's own bootloader into destDir, the EFI/BOOT
-// directory of the installer media's ESP. kind is "grub2" for a signed
-// shim+GRUB pair, with vendor naming the EFI directory it came from, or
+// directory of the installer media's ESP. kind is "grub2" for a shim+GRUB
+// pair, with vendor naming the EFI directory it came from, or
 // "sdboot" with an empty vendor. An image with no bootloader, or one that
 // cannot be read, falls back to the host's systemd-boot.
 func StageBootloader(image, destDir string) (kind, vendor string, err error) {
@@ -191,9 +192,110 @@ func StageBootloader(image, destDir string) (kind, vendor string, err error) {
 		}
 	}
 	if chain.Kind == "grub2" {
-		fmt.Printf(">>> [bootloader] staged %s's signed shim+GRUB pair, vendor %s\n", image, chain.Vendor)
+		fmt.Printf(">>> [bootloader] staged %s's shim+GRUB pair, vendor %s\n", image, chain.Vendor)
 	} else {
 		fmt.Printf(">>> [bootloader] staged %s's systemd-boot\n", image)
 	}
 	return chain.Kind, chain.Vendor, nil
+}
+
+// WriteGrubConfig renders the GRUB menu from the BLS entries staged under
+// espStaging, into EFI/BOOT and the vendor directory when there is one.
+// Both loaders read the same entries, so they cannot name different kernels.
+// A GRUB embeds its vendor path as a prefix and falls back to the directory
+// it was loaded from, so both are written.
+func WriteGrubConfig(espStaging, vendor string) error {
+	entries, err := stagedGrubEntries(espStaging)
+	if err != nil {
+		return err
+	}
+	dirs := []string{filepath.Join("EFI", "BOOT")}
+	if vendor != "" {
+		dirs = append(dirs, filepath.Join("EFI", vendor))
+	}
+	cfg := purefs.LiveGrubMenu(entries)
+	for _, d := range dirs {
+		dir := filepath.Join(espStaging, d)
+		if err := os.MkdirAll(dir, 0755); err != nil {
+			return err
+		}
+		if err := os.WriteFile(filepath.Join(dir, "grub.cfg"), []byte(cfg), 0644); err != nil {
+			return fmt.Errorf("write %s/grub.cfg: %w", d, err)
+		}
+	}
+	return nil
+}
+
+// stagedGrubEntries reads the staged BLS entries in the order systemd-boot
+// by sort-key, with the one loader.conf names as default first.
+func stagedGrubEntries(espStaging string) ([]purefs.GrubEntry, error) {
+	files, _ := filepath.Glob(filepath.Join(espStaging, "loader", "entries", "*.conf"))
+
+	type staged struct {
+		id, sortKey string
+		entry       purefs.GrubEntry
+	}
+	var found []staged
+	for _, f := range files {
+		body, err := os.ReadFile(f)
+		if err != nil {
+			return nil, err
+		}
+		s := staged{id: strings.TrimSuffix(filepath.Base(f), ".conf")}
+		for _, line := range strings.Split(string(body), "\n") {
+			key, val, ok := strings.Cut(strings.TrimSpace(line), " ")
+			if !ok {
+				continue
+			}
+			switch key {
+			case "title":
+				s.entry.Title = val
+			case "sort-key":
+				s.sortKey = val
+			case "linux":
+				s.entry.Kernel = val
+			case "initrd":
+				s.entry.Initrd = val
+			case "options":
+				s.entry.Kargs = val
+			}
+		}
+		if s.entry.Kernel == "" {
+			return nil, fmt.Errorf("BLS entry %s names no kernel", f)
+		}
+		found = append(found, s)
+	}
+	if len(found) == 0 {
+		return nil, fmt.Errorf("no BLS entries under %s", espStaging)
+	}
+
+	sort.SliceStable(found, func(i, j int) bool { return found[i].sortKey < found[j].sortKey })
+	if d := loaderDefault(espStaging); d != "" {
+		sort.SliceStable(found, func(i, j int) bool { return found[i].id == d && found[j].id != d })
+	}
+
+	entries := make([]purefs.GrubEntry, len(found))
+	for i, s := range found {
+		entries[i] = s.entry
+	}
+	return entries, nil
+}
+
+// loaderDefault reads the default entry id from loader.conf, returning ""
+// when the file is absent or names a glob.
+func loaderDefault(espStaging string) string {
+	body, err := os.ReadFile(filepath.Join(espStaging, "loader", "loader.conf"))
+	if err != nil {
+		return ""
+	}
+	for _, line := range strings.Split(string(body), "\n") {
+		if v, ok := strings.CutPrefix(strings.TrimSpace(line), "default "); ok {
+			v = strings.TrimSpace(v)
+			if strings.ContainsAny(v, "*?") {
+				return ""
+			}
+			return strings.TrimSuffix(v, ".conf")
+		}
+	}
+	return ""
 }

@@ -299,3 +299,114 @@ func TestOsReleaseID(t *testing.T) {
 		t.Errorf("got %q from a missing file", got)
 	}
 }
+
+// bls stages one BLS entry the way WriteBLSEntry does.
+func bls(t *testing.T, esp, id, sortKey, title, kernel string) {
+	t.Helper()
+	touch(t, esp, filepath.Join("loader/entries", id+".conf"),
+		"title "+title+"\nsort-key "+sortKey+"\nlinux "+kernel+
+			"\ninitrd /images/pxeboot/"+id+"/initrd.img\noptions root=tbox:CDLABEL=X\n")
+}
+
+// menuTitles returns the menuentry titles of a written grub.cfg, in order.
+func menuTitles(t *testing.T, path string) []string {
+	t.Helper()
+	body, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var out []string
+	for _, line := range strings.Split(string(body), "\n") {
+		if rest, ok := strings.CutPrefix(line, "menuentry '"); ok {
+			out = append(out, strings.TrimSuffix(rest, "' {"))
+		}
+	}
+	return out
+}
+
+// The menu carries what the BLS entries carry, into every directory asked
+// for, so neither loader can name a kernel the other does not.
+func TestWriteGrubConfigDerivesTheMenuFromTheBLSEntries(t *testing.T) {
+	esp := t.TempDir()
+	bls(t, esp, "fedora", "00-tbox-fedora", "Fedora (live)", "/images/pxeboot/fedora/vmlinuz")
+
+	if err := WriteGrubConfig(esp, "fedora"); err != nil {
+		t.Fatal(err)
+	}
+	for _, d := range []string{"EFI/BOOT", "EFI/fedora"} {
+		body, err := os.ReadFile(filepath.Join(esp, d, "grub.cfg"))
+		if err != nil {
+			t.Fatalf("%s: %v", d, err)
+		}
+		for _, want := range []string{
+			"menuentry 'Fedora (live)'",
+			"linux /images/pxeboot/fedora/vmlinuz root=tbox:CDLABEL=X",
+			"initrd /images/pxeboot/fedora/initrd.img",
+		} {
+			if !strings.Contains(string(body), want) {
+				t.Errorf("%s/grub.cfg missing %q\n%s", d, want, body)
+			}
+		}
+	}
+}
+
+// Every environment gets an entry, ordered by sort-key.
+func TestWriteGrubConfigOrdersBySortKey(t *testing.T) {
+	esp := t.TempDir()
+	bls(t, esp, "cc", "0-tbox-3", "Third", "/k/c")
+	bls(t, esp, "aa", "0-tbox-1", "First", "/k/a")
+	bls(t, esp, "bb", "0-tbox-2", "Second", "/k/b")
+
+	if err := WriteGrubConfig(esp, ""); err != nil {
+		t.Fatal(err)
+	}
+	got := menuTitles(t, filepath.Join(esp, "EFI/BOOT/grub.cfg"))
+	if strings.Join(got, ",") != "First,Second,Third" {
+		t.Errorf("got %v", got)
+	}
+}
+
+// GRUB boots its first entry, so the one loader.conf names goes first.
+func TestWriteGrubConfigPutsTheLoaderDefaultFirst(t *testing.T) {
+	esp := t.TempDir()
+	bls(t, esp, "aa", "0-tbox-1", "First", "/k/a")
+	bls(t, esp, "bb", "0-tbox-2", "Second", "/k/b")
+	touch(t, esp, "loader/loader.conf", "timeout 5\ndefault bb.conf\neditor no\n")
+
+	if err := WriteGrubConfig(esp, ""); err != nil {
+		t.Fatal(err)
+	}
+	if got := menuTitles(t, filepath.Join(esp, "EFI/BOOT/grub.cfg")); got[0] != "Second" {
+		t.Errorf("got %v, want Second first", got)
+	}
+}
+
+// `default *` names no entry, so sort-key order stands.
+func TestWriteGrubConfigKeepsSortOrderForAGlobDefault(t *testing.T) {
+	esp := t.TempDir()
+	bls(t, esp, "aa", "0-tbox-1", "First", "/k/a")
+	bls(t, esp, "bb", "0-tbox-2", "Second", "/k/b")
+	touch(t, esp, "loader/loader.conf", "timeout 5\ndefault *\neditor no\n")
+
+	if err := WriteGrubConfig(esp, ""); err != nil {
+		t.Fatal(err)
+	}
+	if got := menuTitles(t, filepath.Join(esp, "EFI/BOOT/grub.cfg")); got[0] != "First" {
+		t.Errorf("got %v, want First first", got)
+	}
+}
+
+// An empty menu that can't boot anything.
+func TestWriteGrubConfigRefusesToWriteAnEmptyMenu(t *testing.T) {
+	if err := WriteGrubConfig(t.TempDir(), ""); err == nil {
+		t.Error("wrote a menu with no BLS entries")
+	}
+}
+
+func TestWriteGrubConfigRefusesAnEntryWithNoKernel(t *testing.T) {
+	esp := t.TempDir()
+	touch(t, esp, "loader/entries/broken.conf", "title Broken\nsort-key 0-tbox-x\n")
+	if err := WriteGrubConfig(esp, ""); err == nil {
+		t.Error("accepted a BLS entry with no linux line")
+	}
+}
